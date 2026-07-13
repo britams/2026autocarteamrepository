@@ -1,0 +1,74 @@
+# 1. app.py 옆에 templates 폴더 생성
+mkdir -p templates
+
+# 2. templates 폴더 안에 실시간 SocketIO 조종기 화면(remote.html) 생성
+cat << 'EOF' > templates/remote.html
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoCar Remote Controller</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket-io/2.3.0/socket-io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+        h2 { color: #00ffcc; }
+        .btn { width: 90px; height: 90px; margin: 5px; font-size: 24px; cursor: pointer; background: #444; color: white; border: 2px solid #666; border-radius: 15px; }
+        .btn:active { background: #00ffcc; color: black; }
+        .mode-btn { width: 200px; height: 50px; font-size: 18px; margin-top: 20px; background: #007bff; color: white; border: none; border-radius: 10px; cursor: pointer; }
+        .mode-btn.auto { background: #28a745; }
+        .kill-btn { width: 200px; height: 50px; font-size: 18px; margin-top: 10px; background: #dc3545; color: white; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; }
+        #status-box { margin-top: 15px; font-size: 18px; color: #aaa; }
+    </style>
+</head>
+<body>
+    <h2>🚗 오토카 무선 제어 패널</h2>
+    <div id="status-box">현재 모드: <span id="mode-text" style="color:#00ffcc; font-weight:bold;">MANUAL</span></div>
+    
+    <div style="margin-top: 30px;">
+        <button class="btn" onclick="sendControl(0, 85)">▲</button><br>
+        <button class="btn" onclick="sendControl(-1, 75)">◀</button>
+        <button class="btn" onclick="sendControl(0, 0)">🛑</button>
+        <button class="btn" onclick="sendControl(1, 75)">▶</button><br>
+        <button class="btn" onclick="sendControl(0, -75)">▼</button>
+    </div>
+
+    <button class="mode-btn" id="modeToggle" onclick="toggleMode()">🤖 자율주행 모드 전환</button><br>
+    <button class="kill-btn" onclick="triggerKillSwitch()">🚨 EMERGENCY STOP</button>
+
+    <script>
+        // 현재 오토카 서버와 웹소켓 실시간 연결 생성
+        const socket = io.connect('http://' + document.domain + ':' + location.port);
+        let currentMode = "MANUAL";
+
+        socket.on('telemetry_update', function(data) {
+            currentMode = data.mode;
+            document.getElementById('mode-text').innerText = currentMode;
+            const modeBtn = document.getElementById('modeToggle');
+            if(currentMode === "AUTO") {
+                modeBtn.innerText = "🕹️ 수동 조종 모드 전환";
+                modeBtn.classList.add('auto');
+            } else {
+                modeBtn.innerText = "🤖 자율주행 모드 전환";
+                modeBtn.classList.remove('auto');
+            }
+        });
+
+        function sendControl(steer, speed) {
+            if(currentMode === "MANUAL") {
+                socket.emit('remote_control', { steering: steer, speed: speed });
+            }
+        }
+
+        function toggleMode() {
+            const nextMode = (currentMode === "MANUAL") ? "AUTO" : "MANUAL";
+            socket.emit('mode_change', { mode: nextMode });
+        }
+
+        function triggerKillSwitch() {
+            socket.emit('kill_switch');
+        }
+    </script>
+</body>
+</html>
+EOF
