@@ -1,0 +1,208 @@
+from pop import Pilot, LiDAR
+import ipywidgets as widgets
+from IPython.display import display
+import threading
+import time
+
+# ==========================================
+# 1. 하드웨어 객체 생성 및 카메라 초기화
+# ==========================================
+Car = Pilot.AutoCar()
+Car.setSpeed(100) 
+
+pan, tilt = 50, 45
+pan_dir, tilt_dir = 1, 1
+Car.camPan(pan)
+Car.camTilt(tilt)
+
+try:
+    print("🔄 라이다 센서 연결 중...")
+    lidar = LiDAR.Rplidar()
+    lidar.connect()
+    lidar.startMotor()
+    print("🎉 하드웨어 및 라이다 준비 완료!")
+except Exception as e:
+    print(f"❌ 연결 실패 : {e}")
+    exit()
+
+# ==========================================
+# 2. 제어 플래그 설정
+# ==========================================
+current_mode = "AUTO"  # 기본 모드: 자율주행 (AUTO / MANUAL)
+manual_cmd = "stop"    # 수동 모드 버튼 명령 저장용
+running = True         # 전체 루프 구동 플래그
+
+# ==========================================
+# 3. 🕹️ 주피터 순수 버튼 리모컨 GUI 디자인
+# ==========================================
+
+# [모드 전환 버튼]
+btn_mode = widgets.Button(
+    description="🤖 현재 모드: 자율주행 (AUTO)", 
+    button_style='success', 
+    layout=widgets.Layout(width='260px', height='45px')
+)
+
+def toggle_mode(b):
+    global current_mode, manual_cmd
+    if current_mode == "AUTO":
+        current_mode = "MANUAL"
+        manual_cmd = "stop"  
+        Car.stop()           
+        b.description = "🕹️ 현재 모드: 수동조작 (MANUAL)"
+        b.button_style = 'warning'
+    else:
+        current_mode = "AUTO"
+        b.description = "🤖 현재 모드: 자율주행 (AUTO)"
+        b.button_style = 'success'
+btn_mode.on_click(toggle_mode)
+
+# [시스템 전체 종료 버튼]
+btn_exit = widgets.Button(
+    description="🛑 전체 정지 및 종료", 
+    button_style='danger', 
+    layout=widgets.Layout(width='260px', height='45px')
+)
+
+def handle_exit(b):
+    global running
+    running = False
+btn_exit.on_click(handle_exit)
+
+# [방향 제어 버튼 생성]
+btn_forward = widgets.Button(description='▲ 전진', layout=widgets.Layout(width='80px', height='45px'))
+btn_backward = widgets.Button(description='▼ 후진', layout=widgets.Layout(width='80px', height='45px'))
+btn_left = widgets.Button(description='◀ 좌회전', layout=widgets.Layout(width='80px', height='45px'))
+btn_right = widgets.Button(description='▶ 우회전', layout=widgets.Layout(width='80px', height='45px'))
+btn_stop_car = widgets.Button(description='■ 정지', button_style='danger', layout=widgets.Layout(width='80px', height='45px'))
+
+# [버튼 클릭 이벤트 매핑]
+def pressed_forward(b): global manual_cmd; manual_cmd = "forward"
+def pressed_backward(b): global manual_cmd; manual_cmd = "backward"
+def pressed_left(b): global manual_cmd; manual_cmd = "left"
+def pressed_right(b): global manual_cmd; manual_cmd = "right"
+def pressed_stop(b): global manual_cmd; manual_cmd = "stop"
+
+btn_forward.on_click(pressed_forward)
+btn_backward.on_click(pressed_backward)
+btn_left.on_click(pressed_left)
+btn_right.on_click(pressed_right)
+btn_stop_car.on_click(pressed_stop)
+
+# [방향 버튼 십자 정렬]
+row_top = widgets.HBox([widgets.Label(layout=widgets.Layout(width='80px')), btn_forward])
+row_mid = widgets.HBox([btn_left, btn_stop_car, btn_right])
+row_bot = widgets.HBox([widgets.Label(layout=widgets.Layout(width='80px')), btn_backward])
+dpad_panel = widgets.VBox([row_top, row_mid, row_bot], layout=widgets.Layout(align_items='center', margin='15px 0 0 0'))
+
+# 상단 UI와 리모컨 패널 결합 후 출력
+ui_layout = widgets.VBox([
+    widgets.HBox([btn_mode, btn_exit]),
+    widgets.Label(value="⚠️ MANUAL 모드에서 아래 방향 버튼을 클릭하여 조종하세요.", layout=widgets.Layout(margin='10px 0 0 0')),
+    dpad_panel
+], layout=widgets.Layout(align_items='center'))
+
+display(ui_layout)
+
+# ==========================================
+# 4. 백그라운드 메인 제어 루프 (스레드)
+# ==========================================
+def main_control_engine():
+    global pan, tilt, pan_dir, tilt_dir, running
+    
+    while running:
+        # ----------------------------------
+        # [모드 1] 🤖 자율주행 모드 (AUTO)
+        # ----------------------------------
+        if current_mode == "AUTO":
+            vectors = lidar.getVectors()
+            obstacle_left = False
+            obstacle_right = False
+            min_distance = 700 
+            closest_angle = None
+
+            for angle, distance, *_ in vectors:
+                if 0 < distance < 700: 
+                    if 315 <= angle <= 360:
+                        obstacle_left = True
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_angle = angle
+                    elif 0 <= angle <= 45:
+                        obstacle_right = True
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_angle = angle
+
+            # 📷 카메라 지그재그 & 타겟 조준 스캔
+            if obstacle_left or obstacle_right:
+                if closest_angle is not None:
+                    if closest_angle >= 315:
+                        relative_angle = closest_angle - 360
+                    else:
+                        relative_angle = closest_angle
+                    pan = 50 + int(relative_angle * (30 / 45))
+                    pan = max(20, min(80, pan)) 
+
+                tilt += tilt_dir * 3.0 
+                if tilt >= 65: tilt_dir = -1
+                elif tilt <= 35: tilt_dir = 1
+            else:
+                pan += pan_dir * 3  
+                if pan >= 80: pan_dir = -1
+                elif pan <= 20: pan_dir = 1
+
+                tilt += tilt_dir * 1.5  
+                if tilt >= 55: tilt_dir = -1   
+                elif tilt <= 35: tilt_dir = 1  
+
+            Car.camPan(int(pan))
+            Car.camTilt(int(tilt))
+
+            # 🚗 차량 주행 제어 (700mm 전진 회피 기반)
+            if obstacle_left and obstacle_right:
+                Car.steering = 0
+                Car.backward(70) 
+            elif obstacle_left:
+                Car.steering = 1  
+                Car.forward(75)   
+            elif obstacle_right:
+                Car.steering = -1 
+                Car.forward(75)   
+            else:
+                Car.steering = 0
+                Car.forward(85)
+
+        # ----------------------------------
+        # [모드 2] 🕹️ 수동 조작 모드 (MANUAL)
+        # ----------------------------------
+        elif current_mode == "MANUAL":
+            # 운전 편의를 위해 카메라는 중앙 정면 고정
+            Car.camPan(50)
+            Car.camTilt(50)
+
+            # 리모컨 버튼 명령 수행
+            if manual_cmd == "forward":
+                Car.steering = 0
+                Car.forward(80)
+            elif manual_cmd == "backward":
+                Car.steering = 0
+                Car.backward(80)
+            elif manual_cmd == "left":
+                Car.steering = -1
+                Car.forward(80)
+            elif manual_cmd == "right":
+                Car.steering = 1
+                Car.forward(80)
+            elif manual_cmd == "stop":
+                Car.stop()
+
+        time.sleep(0.1)
+
+    # 안전 종료
+    Car.stop()
+    lidar.stopMotor()
+    print("\n🛑 시스템이 안전하게 해제되었습니다.")
+
+engine_thread = threading.Thread(target=main_control_engine)
+engine_thread.start()
