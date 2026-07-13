@@ -1,7 +1,4 @@
-# 1. app.py 옆에 templates 폴더 생성
 mkdir -p templates
-
-# 2. templates 폴더 안에 실시간 SocketIO 조종기 화면(remote.html) 생성
 cat << 'EOF' > templates/remote.html
 <!DOCTYPE html>
 <html>
@@ -9,9 +6,8 @@ cat << 'EOF' > templates/remote.html
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AutoCar Remote Controller</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket-io/2.3.0/socket-io.js"></script>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; }
+        body { font-family: Arial, sans-serif; text-align: center; background: #222; color: white; margin: 0; padding: 20px; -webkit-user-select:none; user-select:none; }
         h2 { color: #00ffcc; }
         .btn { width: 90px; height: 90px; margin: 5px; font-size: 24px; cursor: pointer; background: #444; color: white; border: 2px solid #666; border-radius: 15px; }
         .btn:active { background: #00ffcc; color: black; }
@@ -37,11 +33,9 @@ cat << 'EOF' > templates/remote.html
     <button class="kill-btn" onclick="triggerKillSwitch()">🚨 EMERGENCY STOP</button>
 
     <script>
-        // 현재 오토카 서버와 웹소켓 실시간 연결 생성
-        const socket = io.connect('http://' + document.domain + ':' + location.port);
         let currentMode = "MANUAL";
 
-        socket.on('telemetry_update', function(data) {
+        function updateUI(data) {
             currentMode = data.mode;
             document.getElementById('mode-text').innerText = currentMode;
             const modeBtn = document.getElementById('modeToggle');
@@ -52,22 +46,33 @@ cat << 'EOF' > templates/remote.html
                 modeBtn.innerText = "🤖 자율주행 모드 전환";
                 modeBtn.classList.remove('auto');
             }
-        });
+        }
 
         function sendControl(steer, speed) {
             if(currentMode === "MANUAL") {
-                socket.emit('remote_control', { steering: steer, speed: speed });
+                fetch(`/api/control?steering=${steer}&speed=${speed}`)
+                    .then(res => res.json())
+                    .then(data => updateUI(data));
             }
         }
 
         function toggleMode() {
             const nextMode = (currentMode === "MANUAL") ? "AUTO" : "MANUAL";
-            socket.emit('mode_change', { mode: nextMode });
+            fetch(`/api/mode?mode=${nextMode}`)
+                .then(res => res.json())
+                .then(data => updateUI(data));
         }
 
         function triggerKillSwitch() {
-            socket.emit('kill_switch');
+            fetch('/api/kill')
+                .then(res => res.json())
+                .then(data => updateUI(data));
         }
+        
+        // 첫 접속 시 서버 상태 동기화
+        fetch('/api/control?steering=0&speed=0')
+            .then(res => res.json())
+            .then(data => updateUI(data));
     </script>
 </body>
 </html>
