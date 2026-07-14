@@ -1,0 +1,165 @@
+# app.py (구형 젯슨 환경 완벽 호환 및 긴급 정지 자동 해제 통합본)
+from flask import Flask, render_template, request, jsonify, redirect
+from flask_socketio import SocketIO
+import threading
+import time
+import sys
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'autocar_secret_key'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# 전광판 (글로벌 상태 변수)
+telemetry = {
+    "steering": 0, "speed": 0, 
+    "mode": "MANUAL", "status": "READY", 
+    "obstacle": "CLEAR", "action_text": "STOP"
+}
+
+@app.route('/')
+def index():
+    return redirect('/remote')
+
+@app.route('/remote')
+def remote_view(): 
+    return render_template('remote.html')
+
+@app.route('/api/status')
+def api_status(): 
+    return jsonify(telemetry)
+
+# 🕹️ 스마트폰 조종 신호 수신소
+@app.route('/api/control')
+def api_control():
+    global telemetry
+    if telemetry['mode'] == "MANUAL":
+        # 💡 [자동 잠금 해제] 긴급 정지 상태였더라도, 폰으로 다시 방향키나 제어 명령을 주면 조종 락 즉시 해제!
+        if telemetry['status'] == "EMERGENCY_STOP":
+            telemetry['status'] = "READY"
+            
+        try:
+            telemetry['steering'] = int(request.args.get('steering', 0))
+            telemetry['speed'] = int(request.args.get('speed', 0))
+            if telemetry['speed'] > 0: telemetry['action_text'] = "FORWARD"
+            elif telemetry['speed'] < 0: telemetry['action_text'] = "BACKWARD"
+            else: telemetry['action_text'] = "STOP"
+        except: pass
+    return jsonify(telemetry)
+
+@app.route('/api/mode')
+def api_mode():
+    global telemetry
+    telemetry['mode'] = request.args.get('mode', 'MANUAL')
+    telemetry['steering'] = 0; telemetry['speed'] = 0; telemetry['status'] = "READY"
+    return jsonify(telemetry)
+
+@app.route('/api/kill')
+def api_kill():
+    global telemetry
+    telemetry['status'] = "EMERGENCY_STOP"
+    telemetry['mode'] = "MANUAL"; telemetry['speed'] = 0; telemetry['steering'] = 0
+    telemetry['action_text'] = "EMERGENCY STOP"
+    print("🚨 [긴급 제동] 스마트폰 킬 스위치 작동! 차량 즉시 정지")
+    return jsonify(telemetry)
+
+# 🔥 하드웨어 전용 독립 엔진
+def hardware_engine():
+    global telemetry
+    import_success = False
+    Car = None
+    lidar = None
+    
+    try:
+        from pop import Pilot
+        try: from pop import Lidar
+        except ImportError: from pop import LiDAR as Lidar
+        
+        Car = Pilot.AutoCar()
+        Car.setSpeed(100)
+        lidar = Lidar.Rplidar()
+        lidar.connect()
+        lidar.startMotor()
+        
+        print("⏳ 라이다 모터 예열 중 (2초 대기)...")
+        time.sleep(2)
+        print("✅ [시스템] 하드웨어 독립 엔진 시동 완료!")
+        import_success = True
+    except Exception as e:
+        print(f"⚠️ [하드웨어 연결 실패] 가상 모드 구동: {e}")
+
+    last_log_time = 0
+
+    while True:
+        if not import_success:
+            time.sleep(1)
+            continue
+            
+        if telemetry['status'] == "EMERGENCY_STOP":
+            Car.stop()
+            time.sleep(0.05)
+            continue
+
+        left_points = 0
+        right_points = 0
+        min_dist = 9999
+        sensor_alive = True
+        
+        if lidar:
+            try:
+                vectors = lidar.getVectors()
+                if vectors is not None: 
+                    for v in vectors:
+                        if len(v) >= 2 and 50 < v[1] < 700:
+                            if 315 <= v[0] <= 360:
+                                left_points += 1
+                                min_dist = min(min_dist, v[1])
+                            elif 0 <= v[0] <= 45:
+                                right_points += 1
+                                min_dist = min(min_dist, v[1])
+            except Exception:
+                sensor_alive = False
+
+        obs_l = left_points > 3
+        obs_r = right_points > 3
+        telemetry['obstacle'] = "WARNING" if (obs_l or obs_r) else "CLEAR"
+
+        try:
+            if telemetry['mode'] == "MANUAL":
+                Car.steering = telemetry['steering']
+                if telemetry['speed'] > 0: Car.forward(telemetry['speed'])
+                elif telemetry['speed'] < 0: Car.backward(abs(telemetry['speed']))
+                else: Car.stop()
+                
+            elif telemetry['mode'] == "AUTO":
+                if not sensor_alive:
+                    Car.stop(); time.sleep(0.1); continue
+
+                if time.time() - last_log_time > 0.5:
+                    print(f"🤖 [자율주행] ◀ 좌측 감지: {left_points}개 | 우측 감지: {right_points}개")
+                    last_log_time = time.time()
+
+                if obs_l and obs_r:
+                    telemetry['action_text'] = "AVOIDING (BACK)"
+                    Car.steering = 0; Car.backward(70); time.sleep(1.0)
+                    Car.steering = -1; Car.forward(75); time.sleep(0.6)
+                    Car.steering = 0
+                elif obs_l:
+                    telemetry['action_text'] = "AVOIDING (RIGHT)"
+                    Car.steering = 1; Car.forward(75)
+                elif obs_r:
+                    telemetry['action_text'] = "AVOIDING (LEFT)"
+                    Car.steering = -1; Car.forward(75)
+                else:
+                    telemetry['action_text'] = "AUTO FORWARD"
+                    Car.steering = 0; Car.forward(75)
+        except Exception as e:
+            print(f"🚨 [모터 에러]: {e}")
+            
+        time.sleep(0.05)
+
+if __name__ == '__main__':
+    # 1. 하드웨어 엔진을 백그라운드 스레드로 안전하게 격리 실행
+    threading.Thread(target=hardware_engine, daemon=True).start()
+    
+    # 2. 메인 스레드에서 충돌 원인이었던 파라미터를 완전히 제거하고 서버 구동
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
